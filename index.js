@@ -89,7 +89,12 @@ app.post("/token", async (req, res) => {
     form.append("timestamp", timestamp);
     form.append("client_secret_sign", client_secret_sign);
     form.append("grant_type", "client_credentials");
-    form.append("type", "SELF"); // 일반적으로 SELF로 시작 추천
+    // 기존
+    // form.append("type", "SELF");
+    
+    // 변경
+    form.append("type", "SELLER");
+    form.append("account_id", process.env.NAVER_SELLER_ACCOUNT_ID);
 
     const r = await fetch(tokenUrl, {
       method: "POST",
