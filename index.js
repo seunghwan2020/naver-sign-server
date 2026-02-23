@@ -1,9 +1,6 @@
 /**
- * naver-sign-server (Railway) - v1.1 수정본
- * * ✅ 주요 수정 사항:
- * 1. 로그 강화: 네이버가 뱉는 에러를 더 상세히 출력
- * 2. 안정성: fetch 요청 시 타임아웃 및 예외 처리 강화
- * 3. 기본값 최적화: type 파라미터가 없어도 SELF로 안정적 처리
+ * naver-sign-server (Railway) - v1.2 최종 완전판
+ * ✅ 포함 기능: /token(토큰발급), /myip(IP확인), /health(상태체크)
  */
 
 const express = require("express");
@@ -21,21 +18,45 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- 기본 경로 ----------
-app.get("/", (req, res) => res.status(200).send("Naver Sign Server is Running! v1.1"));
+// ---------- 1. 기본 경로 ----------
+app.get("/", (req, res) => res.status(200).send("Naver Sign Server is Running! v1.2"));
+
+// ---------- 2. 공인 IP 확인 (/myip) ----------
+// 네이버 커머스 센터에 등록할 IP를 확인하는 용도입니다.
+app.get("/myip", async (req, res) => {
+  try {
+    const r = await fetch("https://api.ipify.org?format=json");
+    const data = await r.json();
+    return res.status(200).json({ ip: data.ip });
+  } catch (e) {
+    return res.status(500).json({
+      error: "ip_check_failed",
+      message: e?.message || String(e),
+    });
+  }
+});
+
+// ---------- 3. 서버 상태 확인 (/health) ----------
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    env: {
+      hasClientId: !!NAVER_CLIENT_ID,
+      hasClientSecret: !!NAVER_CLIENT_SECRET,
+      hasSellerAccountId: !!NAVER_SELLER_ACCOUNT_ID,
+    },
+  });
+});
 
 // ---------- [유틸] 네이버 토큰 요청 함수 ----------
 async function requestNaverToken(type) {
   const timestamp = Date.now().toString();
   const password = `${NAVER_CLIENT_ID}_${timestamp}`;
 
-  // 1. bcrypt 서명 생성 (SELF 성공을 통해 검증됨)
   const hashed = await bcrypt.hash(password, NAVER_CLIENT_SECRET);
   const client_secret_sign = Buffer.from(hashed).toString("base64");
 
   const tokenUrl = "https://api.commerce.naver.com/external/v1/oauth2/token";
-  
-  // 2. 파라미터 구성
   const params = new URLSearchParams();
   params.append("client_id", NAVER_CLIENT_ID);
   params.append("timestamp", timestamp);
@@ -47,7 +68,6 @@ async function requestNaverToken(type) {
     params.append("account_id", NAVER_SELLER_ACCOUNT_ID);
   }
 
-  // 3. 네이버 서버에 요청
   const response = await fetch(tokenUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -56,68 +76,42 @@ async function requestNaverToken(type) {
 
   const text = await response.text();
   let data;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    data = { raw: text };
-  }
+  try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
 
-  return {
-    ok: response.ok,
-    status: response.status,
-    data: data
-  };
+  return { ok: response.ok, status: response.status, data };
 }
 
-// ---------- [메인] 토큰 발급 API ----------
+// ---------- 4. 토큰 발급 API (/token) ----------
 app.post("/token", async (req, res) => {
   try {
-    // 1. 필수 환경변수 확인
     if (!NAVER_CLIENT_ID || !NAVER_CLIENT_SECRET) {
-      throw new Error("Railway 환경변수(ID/SECRET)가 설정되지 않았습니다.");
+      throw new Error("Railway 환경변수가 설정되지 않았습니다.");
     }
 
-    // 2. 타입 설정 (기본값 SELF)
     const type = (req.query.type || "SELF").toUpperCase();
 
-    // 3. SELLER일 때 계정 ID 확인
     if (type === "SELLER" && !NAVER_SELLER_ACCOUNT_ID) {
-      return res.status(400).json({
-        ok: false,
-        error: "missing_account_id",
-        message: "type=SELLER인 경우 NAVER_SELLER_ACCOUNT_ID 설정이 필요합니다."
-      });
+      return res.status(400).json({ error: "missing_account_id" });
     }
 
-    // 4. 토큰 요청 실행
     const result = await requestNaverToken(type);
 
     if (!result.ok) {
-      console.error(`[NAVER_ERROR] Status: ${result.status}, Body:`, JSON.stringify(result.data));
       return res.status(result.status).json({
         ok: false,
-        source: "NAVER_API",
-        detail: result.data
+        error: "token_failed",
+        response: result.data // 여기에 "호출이 허용되지 않은 IP" 메시지가 담겨서 나옵니다.
       });
     }
 
-    // 5. 성공 응답
-    console.log(`[SUCCESS] Token issued for type: ${type}`);
     return res.status(200).json(result.data);
-
   } catch (err) {
-    console.error("[SERVER_ERROR]", err.message);
-    return res.status(500).json({
-      ok: false,
-      error: "server_internal_error",
-      message: err.message
-    });
+    return res.status(500).json({ error: "server_error", message: err.message });
   }
 });
 
 // ---------- 서버 시작 ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server is listening on port ${PORT}`);
-  console.log(`Mode: ${NAVER_SELLER_ACCOUNT_ID ? 'Full Support' : 'SELF Only'}`);
+  console.log(`Server v1.2 listening on port ${PORT}`);
 });
