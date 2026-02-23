@@ -2,73 +2,63 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-// ✅ 이 서버(Railway)에만 저장할 환경변수
-// NAVER_CLIENT_ID
-// NAVER_CLIENT_SECRET
+// 요청 로그 (무조건 남기기)
+app.use((req, res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+  next();
+});
+
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 
-app.get("/health", (req, res) => res.status(200).send("ok"));
-
-/**
- * 1) 서명 생성만 필요하면 /sign
- * 2) n8n에서 제일 편하게 쓰려면 /token (서명+토큰발급까지 한 번에)
- */
-app.post("/sign", async (req, res) => {
-  try {
-    if (!NAVER_CLIENT_ID || !NAVER_CLIENT_SECRET) {
-      return res.status(500).json({
-        error: "missing_env",
-        message: "NAVER_CLIENT_ID or NAVER_CLIENT_SECRET is not set on auth server",
-      });
-    }
-
-    const timestamp = Date.now().toString();
-    const password = `${NAVER_CLIENT_ID}_${timestamp}`;
-
-    // 네이버 문서 방식: client_secret을 bcrypt salt로 사용
-    const hashed = await bcrypt.hash(password, NAVER_CLIENT_SECRET);
-    const client_secret_sign = Buffer.from(hashed).toString("base64");
-
-    return res.json({
-      client_id: NAVER_CLIENT_ID,
-      timestamp,
-      client_secret_sign,
-    });
-  } catch (e) {
-    return res.status(500).json({
-      error: "sign_failed",
-      message: e?.message || String(e),
-    });
-  }
+app.get("/health", (req, res) => {
+  return res.status(200).json({
+    ok: true,
+    hasClientId: !!NAVER_CLIENT_ID,
+    hasClientSecret: !!NAVER_CLIENT_SECRET,
+    node: process.version,
+  });
 });
+
+// 전역 에러 핸들러용 유틸
+function safeJson(res, status, obj) {
+  try {
+    return res.status(status).json(obj);
+  } catch (e) {
+    // 최후의 수단
+    res.status(status).send(JSON.stringify(obj));
+  }
+}
 
 app.post("/token", async (req, res) => {
   try {
     if (!NAVER_CLIENT_ID || !NAVER_CLIENT_SECRET) {
-      return res.status(500).json({
+      return safeJson(res, 500, {
         error: "missing_env",
-        message: "NAVER_CLIENT_ID or NAVER_CLIENT_SECRET is not set on auth server",
+        message:
+          "Set NAVER_CLIENT_ID and NAVER_CLIENT_SECRET on the auth server (Railway Variables).",
       });
     }
 
     const timestamp = Date.now().toString();
     const password = `${NAVER_CLIENT_ID}_${timestamp}`;
+
+    // ✅ 여기서 Invalid salt면 바로 JSON으로 떨어지게
     const hashed = await bcrypt.hash(password, NAVER_CLIENT_SECRET);
     const client_secret_sign = Buffer.from(hashed).toString("base64");
 
-    // 네이버 토큰 endpoint
     const tokenUrl = "https://api.commerce.naver.com/external/v1/oauth2/token";
 
-    // Node 18+ 에서는 fetch 내장. (Railway Node 22 OK)
     const form = new URLSearchParams();
     form.append("client_id", NAVER_CLIENT_ID);
     form.append("timestamp", timestamp);
     form.append("client_secret_sign", client_secret_sign);
     form.append("grant_type", "client_credentials");
-    form.append("type", "SELF"); // 대부분 SELF로 시작 권장
+    form.append("type", "SELF");
+
+    console.log("[TOKEN] calling naver token endpoint...");
 
     const r = await fetch(tokenUrl, {
       method: "POST",
@@ -76,26 +66,50 @@ app.post("/token", async (req, res) => {
       body: form.toString(),
     });
 
-    const text = await r.text();
+    const raw = await r.text();
+    console.log(`[TOKEN] status=${r.status} body=${raw.slice(0, 300)}`);
+
     let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { raw };
+    }
 
     if (!r.ok) {
-      return res.status(r.status).json({
+      return safeJson(res, r.status, {
         error: "token_failed",
         status: r.status,
         response: data,
       });
     }
 
-    // data: { access_token, token_type, expires_in, ... } 형태
-    return res.json(data);
+    return safeJson(res, 200, data);
   } catch (e) {
-    return res.status(500).json({
+    console.error("[ERR] /token", e);
+    return safeJson(res, 500, {
       error: "token_server_error",
       message: e?.message || String(e),
+      stack: e?.stack,
     });
   }
+});
+
+// 전역 에러 핸들러(Express)
+app.use((err, req, res, next) => {
+  console.error("[EXPRESS_ERR]", err);
+  return safeJson(res, 500, {
+    error: "express_error",
+    message: err?.message || String(err),
+  });
+});
+
+// 프로세스 레벨 에러도 잡기
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT_EXCEPTION]", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED_REJECTION]", err);
 });
 
 const PORT = process.env.PORT || 3000;
